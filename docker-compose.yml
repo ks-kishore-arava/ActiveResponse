@@ -1,0 +1,99 @@
+# version: "3.9"
+services:
+  ### Prefect Database
+  database:
+    image: postgres:15.2-alpine
+    restart: always
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - POSTGRES_DB=prefect
+    ports:
+      - 5432:5432
+    volumes:
+      - db:/var/lib/postgresql/data
+      - ./build/postgres/init.sh:/docker-entrypoint-initdb.d/init_db.sh
+    profiles: ["server"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  ### MinIO for flow storage
+  minio:
+    image: minio/minio:latest
+    entrypoint: ["minio", "server", "--address", "0.0.0.0:9000", "--console-address", "0.0.0.0:9001", "/data"]
+    volumes:
+      - "minio:/data"
+    ports:
+      - 9000:9000
+      - 9001:9001
+    profiles: ["minio"]
+
+  ### Prefect Orion API and UI
+  orion:
+    image: prefecthq/prefect:2.11.5-python3.11
+    restart: always
+    volumes:
+      - prefect:/root/.prefect
+    entrypoint: ["sh", "-c", "prefect orion start"]
+    environment:
+      - PREFECT_ORION_UI_API_URL=http://127.0.0.1:4200/api
+      - PREFECT_API_URL=http://127.0.0.1:4200/api
+      - PREFECT_ORION_DATABASE_CONNECTION_URL=postgresql+asyncpg://postgres:postgres@database:5432/prefect
+    ports:
+      - 4200:4200
+    depends_on:
+      database:
+        condition: service_healthy
+    profiles: ["server"]
+
+  ## Prefect Worker
+  worker:
+    image: prefecthq/prefect:2.11.5-python3.11
+    restart: always
+    entrypoint: ["prefect", "agent", "start", "-q", "actions"]
+    environment:
+      - PREFECT_API_URL=http://orion:4200/api
+    depends_on:
+      - orion
+    profiles: ["worker"]
+
+  ### Prefect CLI
+  cli:
+    image: prefecthq/prefect:2.11.5-python3.11
+    entrypoint: "bash"
+    working_dir: "/root/flows"
+    volumes:
+      - "./flows:/root/flows"
+    environment:
+      - PREFECT_API_URL=http://orion:4200/api
+#       Use PREFECT_API_KEY to use the CLI to interact with Prefect Cloud
+#     - PREFECT_API_KEY=YOUR_API_KEY
+    profiles: ["cli"]
+
+  backend:
+    build:
+      context: ./
+      dockerfile: ./build/active_response/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_CONNECTION_URL=postgresql+asyncpg://postgres:postgres@database:5432/postgres
+      - PREFECT_API_URL=http://orion:4200/api
+    depends_on:
+      database:
+        condition: service_healthy
+      orion:
+        condition: service_started
+    restart: always
+    profiles: ["server"]
+
+volumes:
+  prefect:
+  db:
+  minio:
+# networks:
+#   default:
+#     name: prefect-network
